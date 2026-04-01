@@ -1,0 +1,43 @@
+# Entorno virtual
+env1/
+env/
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Modelos entrenados (archivos grandes)
+models/trained/*/
+models/*.onnx
+
+# Datos de entrenamiento / imágenes capturadas
+data/reference_images/
+data/datasets/
+
+# Logs
+logs/
+
+# Config local con datos sensibles (IPs, etc.)
+# config/app_config.toml  <- descomenta si no quieres commitear la config
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# PyInstaller
+*.spec
+dist/
+build/

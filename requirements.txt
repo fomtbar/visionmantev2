@@ -1,0 +1,25 @@
+# Vision
+opencv-python>=4.9.0
+ultralytics>=8.2.0
+onnxruntime>=1.18.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# GUI
+PyQt6>=6.7.0
+pyqtgraph>=0.13.0
+
+# PLC Communication
+python-snap7>=1.4.0
+pymcprotocol>=0.3.0
+
+# Config & Validation
+pydantic>=2.7.0
+tomli-w>=1.0.0
+
+# Logging
+loguru>=0.7.0
+
+# Dev / Testing
+pytest>=8.0.0
+pytest-qt>=4.4.0
