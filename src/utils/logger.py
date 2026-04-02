@@ -2,19 +2,23 @@ import sys
 from pathlib import Path
 from loguru import logger
 
+from src.utils.paths import get_app_root
+
 
 def setup_logger(log_level: str = "INFO", log_dir: Path | None = None) -> None:
     logger.remove()
 
-    logger.add(
-        sys.stdout,
-        level=log_level,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan> - {message}",
-        colorize=True,
-    )
+    # sys.stdout es None cuando se compila con PyInstaller console=False
+    if sys.stdout is not None:
+        logger.add(
+            sys.stdout,
+            level=log_level,
+            format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan> - {message}",
+            colorize=True,
+        )
 
     if log_dir is None:
-        log_dir = Path(__file__).parents[2] / "logs"
+        log_dir = get_app_root() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.add(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtGui import QKeySequence, QShortcut
@@ -18,6 +19,11 @@ from src.core.config_manager import ConfigManager, ROIZone
 from src.gui.widgets.camera_view import CameraView
 from src.gui.widgets.result_panel import ResultPanel
 from src.gui.dialogs.plc_config_dialog import PLCConfigDialog
+from src.gui.dialogs.reference_dialog import ReferenceSelectionDialog
+from src.gui.dialogs.patterns_gallery_dialog import PatternsGalleryDialog
+from src.utils.paths import get_app_root
+
+_REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
 
 
 class MainWindow(QMainWindow):
@@ -101,6 +107,17 @@ class MainWindow(QMainWindow):
         btn_save_cfg.clicked.connect(self._save_config)
         toolbar.addWidget(btn_save_cfg)
 
+        toolbar.addSeparator()
+
+        btn_gallery = QPushButton("Ver patrones")
+        btn_gallery.setStyleSheet(
+            "QPushButton { color: #00bfff; border: 1px solid #00bfff; border-radius: 3px;"
+            " padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #003355; }"
+        )
+        btn_gallery.clicked.connect(self._open_patterns_gallery)
+        toolbar.addWidget(btn_gallery)
+
     def _build_controls(self) -> QHBoxLayout:
         row = QHBoxLayout()
 
@@ -133,8 +150,8 @@ class MainWindow(QMainWindow):
         self._btn_roi.toggled.connect(self._camera_view.set_draw_mode)
         row.addWidget(self._btn_roi, stretch=1)
 
-        # Botón capturar referencia ORB
-        self._btn_ref = QPushButton("📷  Capturar referencia OK")
+        # Botón capturar referencia ORB (nueva zona)
+        self._btn_ref = QPushButton("📷  Definir zona + Patrón OK")
         self._btn_ref.setFixedHeight(60)
         self._btn_ref.setStyleSheet(
             "QPushButton { background-color: #2c2c3e; color: #00dc50; font-size: 13px; "
@@ -143,6 +160,17 @@ class MainWindow(QMainWindow):
         )
         self._btn_ref.clicked.connect(self._capture_reference)
         row.addWidget(self._btn_ref, stretch=1)
+
+        # Botón agregar patrón a zona existente
+        self._btn_add_pattern = QPushButton("➕  Agregar patrón OK")
+        self._btn_add_pattern.setFixedHeight(60)
+        self._btn_add_pattern.setStyleSheet(
+            "QPushButton { background-color: #2c2c3e; color: #7ec8e3; font-size: 13px; "
+            "border-radius: 8px; border: 2px solid #7ec8e3; }"
+            "QPushButton:hover { background-color: #0a2233; }"
+        )
+        self._btn_add_pattern.clicked.connect(self._add_pattern_to_zone)
+        row.addWidget(self._btn_add_pattern, stretch=1)
 
         # Botón limpiar ROIs
         btn_clear_roi = QPushButton("🗑  Limpiar ROIs")
@@ -248,13 +276,98 @@ class MainWindow(QMainWindow):
         if frame is None:
             QMessageBox.warning(self, "Sin cámara", "No hay frame disponible.")
             return
-        if self._engine.load_orb_reference(frame):
-            QMessageBox.information(self, "Referencia OK",
-                                    "Imagen de referencia capturada correctamente.\n"
-                                    "El sistema comparará contra esta imagen.")
-            logger.info("Referencia ORB capturada desde GUI")
+
+        dlg = ReferenceSelectionDialog(frame, parent=self)
+        if not dlg.exec():
+            return
+
+        # 1. Crear zona ROI a partir del rectángulo dibujado
+        rect = dlg.selected_rect
+        self._roi_counter += 1
+        zone_id = f"zona_{self._roi_counter}"
+        zone = ROIZone(
+            id=zone_id,
+            x=rect.x(), y=rect.y(),
+            w=rect.width(), h=rect.height(),
+        )
+        self._engine.roi_manager.add_zone(zone)
+        zones = self._engine.roi_manager.get_zones()
+        self._camera_view.set_roi_zones(zones)
+        self._cfg.update_rois([z.model_dump() for z in zones])
+
+        # 2. Guardar patrón en disco (directorio por zona)
+        zone_dir = _REFERENCE_IMAGES_DIR / zone_id
+        zone_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(zone_dir.glob("*.png"))
+        ref_path = zone_dir / f"{len(existing) + 1:03d}.png"
+        saved = cv2.imwrite(str(ref_path), dlg.cropped_image)
+        if saved:
+            logger.info(f"Patrón guardado en disco: {ref_path}")
         else:
-            QMessageBox.warning(self, "Error", "No se pudo extraer features de la imagen.")
+            logger.warning(f"No se pudo guardar el patrón en: {ref_path}")
+
+        # 3. Cargar patrón en el matcher de la zona
+        if not self._engine.add_zone_reference(zone_id, dlg.cropped_image):
+            QMessageBox.warning(self, "Error", "No se pudo extraer features del patrón.\n"
+                                               "Intenta con mejor iluminación o más textura.")
+            return
+
+        logger.info(f"Patrón OK capturado + ROI '{zone_id}' creada ({rect.width()}×{rect.height()})")
+        self.statusBar().showMessage(
+            f"Patrón OK capturado — zona '{zone_id}' ({rect.width()}×{rect.height()} px)", 5000
+        )
+
+    def _add_pattern_to_zone(self) -> None:
+        """Agrega un nuevo patrón de referencia a una zona ya existente."""
+        zones = self._engine.roi_manager.get_zones()
+        if not zones:
+            QMessageBox.information(self, "Sin zonas",
+                                    "No hay zonas ROI definidas.\n"
+                                    "Usa '📷 Definir zona + Patrón OK' para crear una zona primero.")
+            return
+
+        zone_ids = [z.id for z in zones]
+        if len(zone_ids) == 1:
+            zone_id = zone_ids[0]
+        else:
+            zone_id, ok = QInputDialog.getItem(
+                self, "Agregar patrón",
+                "Selecciona la zona a la que agregar el patrón:",
+                zone_ids, 0, False
+            )
+            if not ok:
+                return
+
+        frame = self._engine.camera.get_frame()
+        if frame is None:
+            QMessageBox.warning(self, "Sin cámara", "No hay frame disponible.")
+            return
+
+        dlg = ReferenceSelectionDialog(frame, parent=self)
+        if not dlg.exec():
+            return
+
+        # Guardar en directorio de la zona
+        zone_dir = _REFERENCE_IMAGES_DIR / zone_id
+        zone_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(zone_dir.glob("*.png"))
+        ref_path = zone_dir / f"{len(existing) + 1:03d}.png"
+        saved = cv2.imwrite(str(ref_path), dlg.cropped_image)
+        if saved:
+            logger.info(f"Patrón adicional guardado: {ref_path}")
+        else:
+            logger.warning(f"No se pudo guardar el patrón en: {ref_path}")
+
+        # Cargar en el matcher de la zona
+        if not self._engine.add_zone_reference(zone_id, dlg.cropped_image):
+            QMessageBox.warning(self, "Error", "No se pudo extraer features del patrón.")
+            return
+
+        n = len(existing) + 1
+        self.statusBar().showMessage(
+            f"Patrón #{n} agregado a zona '{zone_id}'", 5000
+        )
+        logger.info(f"Patrón #{n} agregado a zona '{zone_id}'")
 
     def _clear_rois(self) -> None:
         reply = QMessageBox.question(
@@ -267,6 +380,11 @@ class MainWindow(QMainWindow):
             self._camera_view.set_roi_zones([])
             self._cfg.update_rois([])
             self._roi_counter = 0
+
+    def _open_patterns_gallery(self) -> None:
+        zones = self._engine.roi_manager.get_zones()
+        dlg = PatternsGalleryDialog(zones, self)
+        dlg.exec()
 
     def _open_plc_config(self) -> None:
         dlg = PLCConfigDialog(self._cfg.plc, self)

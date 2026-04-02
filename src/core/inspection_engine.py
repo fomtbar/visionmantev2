@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 from enum import Enum, auto
+from src.utils.paths import get_app_root
+
+_REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
 
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -60,6 +63,9 @@ class InspectionEngine(QObject):
             self._setup_plc()
 
         self._last_trigger_time: float = 0.0
+
+        # Restaurar referencias guardadas en sesiones anteriores
+        self._load_saved_references()
 
     # ── Trigger entry points ─────────────────────────────────────────────────
 
@@ -136,13 +142,44 @@ class InspectionEngine(QObject):
 
     # ── Config updates ────────────────────────────────────────────────────────
 
+    def _load_saved_references(self) -> None:
+        """Carga automáticamente todos los patrones guardados en disco al arrancar."""
+        if not _REFERENCE_IMAGES_DIR.exists():
+            return
+
+        zone_ids = {z.id for z in self._roi_manager.get_zones()}
+
+        for zone_id in zone_ids:
+            # Formato nuevo: directorio por zona con múltiples patrones
+            zone_dir = _REFERENCE_IMAGES_DIR / zone_id
+            if zone_dir.is_dir():
+                patterns = sorted(zone_dir.glob("*.png"))
+                count = 0
+                for path in patterns:
+                    if self._classifier.add_zone_reference_from_path(zone_id, path):
+                        count += 1
+                if count:
+                    logger.info(f"Zona '{zone_id}': {count} patrón(es) ORB restaurado(s)")
+                continue
+
+            # Formato legado: archivo único {zone_id}.png
+            legacy_path = _REFERENCE_IMAGES_DIR / f"{zone_id}.png"
+            if legacy_path.exists():
+                if self._classifier.add_zone_reference_from_path(zone_id, legacy_path):
+                    logger.info(f"Referencia ORB restaurada (legacy): {legacy_path.name}")
+
     def reload_config(self) -> None:
         self._cfg.load()
         self._roi_manager.set_zones(self._cfg.rois.zones)
         self._classifier.update_config(self._cfg.vision)
         self._classifier.update_job(self._cfg.app.job_name)
 
+    def add_zone_reference(self, zone_id: str, image: np.ndarray) -> bool:
+        """Agrega un patrón de referencia para una zona específica."""
+        return self._classifier.add_zone_reference(zone_id, image)
+
     def load_orb_reference(self, image: np.ndarray) -> bool:
+        """Legacy: carga referencia en el matcher global."""
         return self._classifier.load_orb_reference(image)
 
     # ── Accessors ─────────────────────────────────────────────────────────────

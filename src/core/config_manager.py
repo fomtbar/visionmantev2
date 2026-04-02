@@ -8,6 +8,8 @@ import tomli_w
 from pydantic import BaseModel, Field, field_validator
 from loguru import logger
 
+from src.utils.paths import get_app_root
+
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
 
@@ -83,7 +85,7 @@ class FullConfig(BaseModel):
 # ── Manager ──────────────────────────────────────────────────────────────────
 
 class ConfigManager:
-    _DEFAULT_PATH = Path(__file__).parents[2] / "config" / "app_config.toml"
+    _DEFAULT_PATH = get_app_root() / "config" / "app_config.toml"
 
     def __init__(self, config_path: Path | None = None):
         self._path = config_path or self._DEFAULT_PATH
