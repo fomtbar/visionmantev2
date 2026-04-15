@@ -9,7 +9,8 @@ from src.core.config_manager import ROIZone
 @dataclass
 class ROICrop:
     zone: ROIZone
-    image: np.ndarray
+    image: np.ndarray              # crop ajustado a la zona (copia)
+    frame: np.ndarray              # frame completo (referencia — para búsqueda expandida)
     frame_shape: tuple[int, int]   # (h, w) del frame original
 
 
@@ -46,6 +47,7 @@ class ROIManager:
                 crops.append(ROICrop(
                     zone=zone,
                     image=frame[y1:y2, x1:x2].copy(),
+                    frame=frame,   # referencia al frame — sin copiar
                     frame_shape=(h, w),
                 ))
 
@@ -55,7 +57,7 @@ class ROIManager:
         """Si no hay ROIs definidas, usa el frame completo como una zona."""
         h, w = frame.shape[:2]
         default_zone = ROIZone(id="full", x=0, y=0, w=w, h=h)
-        return [ROICrop(zone=default_zone, image=frame.copy(), frame_shape=(h, w))]
+        return [ROICrop(zone=default_zone, image=frame.copy(), frame=frame, frame_shape=(h, w))]
 
     def get_crops(self, frame: np.ndarray) -> list[ROICrop]:
         if self._zones:

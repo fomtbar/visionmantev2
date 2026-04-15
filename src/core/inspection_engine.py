@@ -161,14 +161,14 @@ class InspectionEngine(QObject):
                     if self._classifier.add_zone_reference_from_path(zone_id, path):
                         count += 1
                 if count:
-                    logger.info(f"Zona '{zone_id}': {count} patrón(es) ORB restaurado(s)")
+                    logger.info(f"Zona '{zone_id}': {count} patrón(es) restaurado(s)")
                 continue
 
             # Formato legado: archivo único {zone_id}.png
             legacy_path = _REFERENCE_IMAGES_DIR / f"{zone_id}.png"
             if legacy_path.exists():
                 if self._classifier.add_zone_reference_from_path(zone_id, legacy_path):
-                    logger.info(f"Referencia ORB restaurada (legacy): {legacy_path.name}")
+                    logger.info(f"Referencia restaurada (legacy): {legacy_path.name}")
 
     def reload_config(self) -> None:
         self._cfg.load()
