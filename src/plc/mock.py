@@ -12,6 +12,7 @@ class MockPLC(AbstractPLC):
         self._trigger_value = False
         self._last_result: bool | None = None
         self._write_log: list[dict] = []
+        self._bits: dict[str, bool] = {}
 
     def connect(self) -> bool:
         self._connected = True
@@ -39,6 +40,13 @@ class MockPLC(AbstractPLC):
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def write_bit(self, address: str, value: bool) -> None:
+        self._bits[address.upper()] = value
+        logger.debug(f"MockPLC: write_bit {address} = {value}")
+
+    def read_bit(self, address: str) -> bool:
+        return self._bits.get(address.upper(), False)
 
     def get_info(self) -> dict:
         return {"brand": "mock", "status": "simulación", "last_result": self._last_result}

@@ -43,7 +43,8 @@ class PLCConfig(BaseModel):
     enabled: bool = False
     brand: Literal["siemens", "mitsubishi", "mock"] = "mock"
     ip: str = "192.168.0.1"
-    port: int = 102
+    port: int = 1025   # Mitsubishi Q MC Protocol 3E. Siemens S7 usa 102.
+    commtype: Literal["binary", "ascii"] = "binary"   # Mitsubishi: binario o ASCII
     trigger_address: str = "DB1.DBX0.0"
     result_ok_address: str = "DB1.DBX0.1"
     result_ng_address: str = "DB1.DBX0.2"

@@ -19,8 +19,10 @@ from src.core.config_manager import ConfigManager, ROIZone
 from src.gui.widgets.camera_view import CameraView
 from src.gui.widgets.result_panel import ResultPanel
 from src.gui.dialogs.plc_config_dialog import PLCConfigDialog
+from src.gui.dialogs.plc_test_dialog import PLCTestDialog
 from src.gui.dialogs.reference_dialog import ReferenceSelectionDialog
 from src.gui.dialogs.patterns_gallery_dialog import PatternsGalleryDialog
+from src.gui.dialogs.camera_select_dialog import CameraSelectDialog
 from src.utils.paths import get_app_root
 
 _REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
@@ -83,14 +85,33 @@ class MainWindow(QMainWindow):
 
         # ── Status bar ────────────────────────────────────────────────────────
         self._status_bar = self.statusBar()
+
         self._lbl_state = QLabel("Estado: IDLE")
-        self._lbl_plc = QLabel("PLC: desconectado")
-        self._lbl_algo = QLabel(f"Algoritmo: {self._engine.algorithm_name}")
-        for lbl in (self._lbl_state, self._lbl_plc, self._lbl_algo):
-            lbl.setStyleSheet("color: #aaa; margin: 0 10px;")
+        self._lbl_state.setStyleSheet("color: #aaa; margin: 0 10px;")
         self._status_bar.addWidget(self._lbl_state)
+
+        self._lbl_plc = QLabel()
+        self._lbl_plc.setStyleSheet("color: #aaa; margin: 0 6px;")
         self._status_bar.addWidget(self._lbl_plc)
+
+        # Botón reconectar — solo visible cuando PLC habilitado y desconectado
+        self._btn_plc_reconnect = QPushButton("↺ Reconectar")
+        self._btn_plc_reconnect.setFixedHeight(22)
+        self._btn_plc_reconnect.setStyleSheet(
+            "QPushButton { color: #ffa040; border: 1px solid #ffa040; border-radius: 3px;"
+            " padding: 1px 8px; font-size: 11px; margin: 2px; }"
+            "QPushButton:hover { background-color: #2a1800; }"
+        )
+        self._btn_plc_reconnect.setVisible(False)
+        self._btn_plc_reconnect.clicked.connect(self._on_plc_reconnect)
+        self._status_bar.addWidget(self._btn_plc_reconnect)
+
+        self._lbl_algo = QLabel(f"Algoritmo: {self._engine.algorithm_name}")
+        self._lbl_algo.setStyleSheet("color: #aaa; margin: 0 10px;")
         self._status_bar.addPermanentWidget(self._lbl_algo)
+
+        # Estado inicial del PLC en la barra
+        self._refresh_plc_status_bar()
 
         # ── Toolbar ───────────────────────────────────────────────────────────
         toolbar = QToolBar("Principal")
@@ -100,6 +121,26 @@ class MainWindow(QMainWindow):
         btn_plc = QPushButton("Config PLC")
         btn_plc.clicked.connect(self._open_plc_config)
         toolbar.addWidget(btn_plc)
+
+        btn_plc_test = QPushButton("Probar PLC")
+        btn_plc_test.setStyleSheet(
+            "QPushButton { color: #ffd700; border: 1px solid #ffd700; border-radius: 3px;"
+            " padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #2a2a10; }"
+        )
+        btn_plc_test.clicked.connect(self._open_plc_test)
+        toolbar.addWidget(btn_plc_test)
+
+        toolbar.addSeparator()
+
+        self._btn_camera = QPushButton(f"Camara {self._cfg.camera.device_index}")
+        self._btn_camera.setStyleSheet(
+            "QPushButton { color: #7ec8e3; border: 1px solid #7ec8e3; border-radius: 3px;"
+            " padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #0a2233; }"
+        )
+        self._btn_camera.clicked.connect(self._open_camera_select)
+        toolbar.addWidget(self._btn_camera)
 
         toolbar.addSeparator()
 
@@ -120,10 +161,12 @@ class MainWindow(QMainWindow):
 
     def _build_controls(self) -> QHBoxLayout:
         row = QHBoxLayout()
+        row.setSpacing(6)
 
-        # Botón TRIGGER (grande, llamativo)
+        # ── Producción ────────────────────────────────────────────────────────
         self._btn_trigger = QPushButton("▶  INSPECCIONAR")
         self._btn_trigger.setFixedHeight(60)
+        self._btn_trigger.setToolTip("Dispara una inspección (también: Espacio)")
         self._btn_trigger.setStyleSheet(
             "QPushButton { background-color: #1e6fe0; color: white; font-size: 18px; "
             "font-weight: bold; border-radius: 8px; }"
@@ -134,36 +177,32 @@ class MainWindow(QMainWindow):
         self._btn_trigger.clicked.connect(self._engine.trigger)
         row.addWidget(self._btn_trigger, stretch=3)
 
-        # Shortcut: Espacio = trigger
         shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         shortcut.activated.connect(self._engine.trigger)
 
-        # Botón definir ROI
-        self._btn_roi = QPushButton("✏  Definir ROI")
-        self._btn_roi.setFixedHeight(60)
-        self._btn_roi.setCheckable(True)
-        self._btn_roi.setStyleSheet(
-            "QPushButton { background-color: #2c2c3e; color: #ffd700; font-size: 14px; "
-            "border-radius: 8px; border: 2px solid #ffd700; }"
-            "QPushButton:checked { background-color: #ffd700; color: #1a1a2e; }"
-        )
-        self._btn_roi.toggled.connect(self._camera_view.set_draw_mode)
-        row.addWidget(self._btn_roi, stretch=1)
-
-        # Botón capturar referencia ORB (nueva zona)
-        self._btn_ref = QPushButton("📷  Definir zona + Patrón OK")
+        # ── Configuración de zonas ────────────────────────────────────────────
+        # Paso 1: crear zona y capturar primer patrón
+        self._btn_ref = QPushButton("Nueva zona")
         self._btn_ref.setFixedHeight(60)
+        self._btn_ref.setToolTip(
+            "Paso 1 — Dibujá el área a inspeccionar y capturá\n"
+            "una foto de referencia ('pieza presente = OK')."
+        )
         self._btn_ref.setStyleSheet(
             "QPushButton { background-color: #2c2c3e; color: #00dc50; font-size: 13px; "
-            "border-radius: 8px; border: 2px solid #00dc50; }"
+            "font-weight: bold; border-radius: 8px; border: 2px solid #00dc50; }"
             "QPushButton:hover { background-color: #003322; }"
         )
         self._btn_ref.clicked.connect(self._capture_reference)
         row.addWidget(self._btn_ref, stretch=1)
 
-        # Botón agregar patrón a zona existente
-        self._btn_add_pattern = QPushButton("➕  Agregar patrón OK")
+        # Paso 2 (opcional): agregar más fotos de referencia a una zona ya creada
+        self._btn_add_pattern = QPushButton("+ Variante")
         self._btn_add_pattern.setFixedHeight(60)
+        self._btn_add_pattern.setToolTip(
+            "Paso 2 (opcional) — Agregá otra foto de referencia\n"
+            "a una zona existente (ej: pieza con otra orientación)."
+        )
         self._btn_add_pattern.setStyleSheet(
             "QPushButton { background-color: #2c2c3e; color: #7ec8e3; font-size: 13px; "
             "border-radius: 8px; border: 2px solid #7ec8e3; }"
@@ -172,15 +211,17 @@ class MainWindow(QMainWindow):
         self._btn_add_pattern.clicked.connect(self._add_pattern_to_zone)
         row.addWidget(self._btn_add_pattern, stretch=1)
 
-        # Botón limpiar ROIs
-        btn_clear_roi = QPushButton("🗑  Limpiar ROIs")
-        btn_clear_roi.setFixedHeight(60)
-        btn_clear_roi.setStyleSheet(
+        # Limpiar todo
+        btn_clear = QPushButton("Limpiar zonas")
+        btn_clear.setFixedHeight(60)
+        btn_clear.setToolTip("Elimina todas las zonas y sus patrones de referencia")
+        btn_clear.setStyleSheet(
             "QPushButton { background-color: #2c2c3e; color: #ff6b6b; font-size: 13px; "
             "border-radius: 8px; border: 2px solid #ff6b6b; }"
+            "QPushButton:hover { background-color: #330a0a; }"
         )
-        btn_clear_roi.clicked.connect(self._clear_rois)
-        row.addWidget(btn_clear_roi, stretch=1)
+        btn_clear.clicked.connect(self._clear_rois)
+        row.addWidget(btn_clear, stretch=1)
 
         return row
 
@@ -214,16 +255,9 @@ class MainWindow(QMainWindow):
     # ── Signal connections ────────────────────────────────────────────────────
 
     def _connect_signals(self) -> None:
-        # Cámara → vista
         self._engine.camera.frame_ready.connect(self._camera_view.update_frame)
-
-        # Resultado → vista y panel
         self._engine.inspection_complete.connect(self._on_inspection_complete)
-
-        # Estado del motor
         self._engine.state_changed.connect(self._on_state_changed)
-
-        # PLC status
         self._engine.plc_status_changed.connect(self._on_plc_status)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
@@ -239,13 +273,40 @@ class MainWindow(QMainWindow):
         self._btn_trigger.setEnabled(not busy)
 
     def _on_plc_status(self, connected: bool) -> None:
+        self._refresh_plc_status_bar(connected)
+
+    def _refresh_plc_status_bar(self, connected: bool | None = None) -> None:
+        plc_cfg = self._cfg.plc
+
+        if not plc_cfg.enabled:
+            self._lbl_plc.setText("PLC: deshabilitado")
+            self._lbl_plc.setStyleSheet("color: #666; margin: 0 6px;")
+            self._btn_plc_reconnect.setVisible(False)
+            return
+
+        if connected is None:
+            connected = self._engine._plc.is_connected() if self._engine._plc else False
+
         if connected:
-            info = self._cfg.plc
-            self._lbl_plc.setText(f"PLC: {info.brand.upper()} {info.ip} ✓")
-            self._lbl_plc.setStyleSheet("color: #00dc50; margin: 0 10px;")
+            self._lbl_plc.setText(
+                f"PLC: {plc_cfg.brand.upper()}  {plc_cfg.ip}:{plc_cfg.port}  ✓"
+            )
+            self._lbl_plc.setStyleSheet("color: #00dc50; margin: 0 6px;")
+            self._btn_plc_reconnect.setVisible(False)
         else:
-            self._lbl_plc.setText("PLC: desconectado")
-            self._lbl_plc.setStyleSheet("color: #ff6b6b; margin: 0 10px;")
+            self._lbl_plc.setText(
+                f"PLC: {plc_cfg.brand.upper()}  {plc_cfg.ip}:{plc_cfg.port}  ✗"
+            )
+            self._lbl_plc.setStyleSheet("color: #ff6b6b; margin: 0 6px;")
+            self._btn_plc_reconnect.setVisible(True)
+
+    def _on_plc_reconnect(self) -> None:
+        self._btn_plc_reconnect.setEnabled(False)
+        self._btn_plc_reconnect.setText("Conectando…")
+        ok = self._engine.reconnect_plc()
+        self._btn_plc_reconnect.setEnabled(True)
+        self._btn_plc_reconnect.setText("↺ Reconectar")
+        self._refresh_plc_status_bar(ok)
 
     def _on_roi_defined(self, rect: QRect) -> None:
         self._roi_counter += 1
@@ -383,15 +444,47 @@ class MainWindow(QMainWindow):
 
     def _open_patterns_gallery(self) -> None:
         zones = self._engine.roi_manager.get_zones()
-        dlg = PatternsGalleryDialog(zones, self)
+        dlg = PatternsGalleryDialog(zones, self._engine.reload_zone_references, self)
         dlg.exec()
 
     def _open_plc_config(self) -> None:
         dlg = PLCConfigDialog(self._cfg.plc, self)
-        if dlg.exec():
-            new_plc_cfg = dlg.get_config()
-            self._cfg.update_plc(**new_plc_cfg.model_dump())
-            QMessageBox.information(self, "PLC", "Config guardada. Reinicia para aplicar.")
+        if not dlg.exec():
+            return
+        new_cfg = dlg.get_config()
+        self._cfg.update_plc(**new_cfg.model_dump())
+        self._cfg.save()
+        connected = self._engine.apply_plc_config(new_cfg)
+        self._refresh_plc_status_bar(connected if new_cfg.enabled else None)
+        msg = (
+            f"PLC {new_cfg.brand.upper()} {new_cfg.ip}:{new_cfg.port} — conectado."
+            if connected else
+            f"Config guardada. PLC {new_cfg.brand.upper()} no conectó — reintentando en segundo plano."
+            if new_cfg.enabled else
+            "PLC deshabilitado."
+        )
+        self.statusBar().showMessage(msg, 4000)
+
+    def _open_plc_test(self) -> None:
+        dlg = PLCTestDialog(self)
+        dlg.exec()
+
+    def _open_camera_select(self) -> None:
+        dlg = CameraSelectDialog(
+            current_index=self._cfg.camera.device_index,
+            config=self._cfg.camera,
+            on_selected=self._switch_camera,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _switch_camera(self, index: int) -> None:
+        self._cfg.update_camera(device_index=index)
+        self._engine.camera.update_config(self._cfg.camera)
+        self._btn_camera.setText(f"Camara {index}")
+        self._cfg.save()
+        self.statusBar().showMessage(f"Camara {index} activa.", 3000)
+        logger.info(f"Camara cambiada a indice {index}")
 
     def _save_config(self) -> None:
         self._cfg.save()

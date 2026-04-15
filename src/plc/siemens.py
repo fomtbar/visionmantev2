@@ -62,7 +62,9 @@ class SiemensPLC(AbstractPLC):
             self._connected = False
             return False
 
-    def _write_bit(self, address: str, value: bool) -> None:
+    def write_bit(self, address: str, value: bool) -> None:
+        if not self._connected:
+            raise ConnectionError("Siemens no conectado")
         db, byte_num, bit_num = _parse_s7_address(address)
         data = self._client.db_read(db, byte_num, 1)
         if value:
@@ -70,13 +72,21 @@ class SiemensPLC(AbstractPLC):
         else:
             data[0] &= ~(1 << bit_num)
         self._client.db_write(db, byte_num, data)
+        logger.debug(f"Siemens write_bit {address} = {value}")
+
+    def read_bit(self, address: str) -> bool:
+        if not self._connected:
+            raise ConnectionError("Siemens no conectado")
+        db, byte_num, bit_num = _parse_s7_address(address)
+        data = self._client.db_read(db, byte_num, 1)
+        return bool((data[0] >> bit_num) & 1)
 
     def write_result(self, ok: bool) -> None:
         if not self._connected:
             return
         try:
-            self._write_bit(self._config.result_ok_address, ok)
-            self._write_bit(self._config.result_ng_address, not ok)
+            self.write_bit(self._config.result_ok_address, ok)
+            self.write_bit(self._config.result_ng_address, not ok)
         except Exception as e:
             logger.error(f"Siemens write_result error: {e}")
 

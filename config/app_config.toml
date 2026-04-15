@@ -22,15 +22,22 @@ any_ng_is_global_ng = true
 min_cycle_time_ms = 200
 
 [plc]
-enabled = false
+enabled = true
 brand = "mock"
-ip = "192.168.0.1"
-port = 102
-trigger_address = "DB1.DBX0.0"
-result_ok_address = "DB1.DBX0.1"
-result_ng_address = "DB1.DBX0.2"
+ip = "192.168.3.39"
+port = 502
+commtype = "binary"
+trigger_address = "m1210"
+result_ok_address = "M1200"
+result_ng_address = "M1201"
 result_hold_ms = 500
 poll_interval_ms = 20
 
-[rois]
-zones = []
+[[rois.zones]]
+id = "zona_1"
+x = 484
+y = 414
+w = 148
+h = 171
+expected_class = "ok"
+expected_count = 1

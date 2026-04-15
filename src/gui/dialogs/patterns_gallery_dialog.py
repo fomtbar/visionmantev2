@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import cv2
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
@@ -18,28 +18,23 @@ _REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
 
 
 def _get_zone_patterns(zone_id: str) -> list[Path]:
-    """Retorna lista ordenada de archivos de patrón para la zona."""
     zone_dir = _REFERENCE_IMAGES_DIR / zone_id
     if zone_dir.is_dir():
         return sorted(zone_dir.glob("*.png"))
-    # Formato legacy: archivo único
     legacy = _REFERENCE_IMAGES_DIR / f"{zone_id}.png"
     if legacy.exists():
         return [legacy]
     return []
 
 
-class _PatternThumbnail(QFrame):
-    """Miniatura de un patrón individual con botón de eliminar."""
+# ── Miniatura individual ──────────────────────────────────────────────────────
 
-    deleted = pyqtSignal(Path)  # ruta del archivo eliminado
+class _PatternThumbnail(QFrame):
+    deleted = pyqtSignal(Path)
 
     def __init__(self, path: Path, index: int, parent=None):
         super().__init__(parent)
         self._path = path
-        self._build_ui(index)
-
-    def _build_ui(self, index: int) -> None:
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             "_PatternThumbnail { background-color: #1e1e30; border: 1px solid #555;"
@@ -52,14 +47,11 @@ class _PatternThumbnail(QFrame):
         thumb = QLabel()
         thumb.setFixedSize(120, 90)
         thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        pix = QPixmap(str(self._path))
+        pix = QPixmap(str(path))
         if not pix.isNull():
-            thumb.setPixmap(
-                pix.scaled(120, 90,
-                           Qt.AspectRatioMode.KeepAspectRatio,
-                           Qt.TransformationMode.SmoothTransformation)
-            )
+            thumb.setPixmap(pix.scaled(120, 90,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
             thumb.setStyleSheet("background-color: #111; border-radius: 3px;")
         else:
             thumb.setText("Error")
@@ -71,9 +63,8 @@ class _PatternThumbnail(QFrame):
         lbl.setStyleSheet("color: #aaa; font-size: 10px;")
         layout.addWidget(lbl)
 
-        btn_del = QPushButton("✕")
+        btn_del = QPushButton("✕ Eliminar")
         btn_del.setFixedHeight(22)
-        btn_del.setToolTip("Eliminar este patrón")
         btn_del.setStyleSheet(
             "QPushButton { background-color: #3a1a1a; color: #ff6b6b;"
             " border: 1px solid #ff6b6b; border-radius: 3px; font-size: 11px; }"
@@ -85,7 +76,8 @@ class _PatternThumbnail(QFrame):
     def _on_delete(self) -> None:
         reply = QMessageBox.question(
             self, "Eliminar patrón",
-            f"¿Eliminar el patrón '{self._path.name}'?",
+            f"¿Eliminar '{self._path.name}'?\n"
+            "El motor actualizará los patrones automáticamente.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -96,87 +88,109 @@ class _PatternThumbnail(QFrame):
                 QMessageBox.warning(self, "Error", f"No se pudo eliminar:\n{exc}")
 
 
+# ── Tarjeta de zona ───────────────────────────────────────────────────────────
+
 class _PatternCard(QFrame):
-    """Tarjeta con todos los patrones de una zona ROI."""
+    """
+    Tarjeta de una zona ROI con sus miniaturas.
+    Se auto-actualiza cuando se elimina un patrón sin necesidad de recrear el diálogo.
+    """
 
-    reference_deleted = pyqtSignal(str)   # zone_id (algún patrón fue eliminado)
-    add_pattern_requested = pyqtSignal(str)  # zone_id
-
-    def __init__(self, zone: ROIZone, parent=None):
+    def __init__(self, zone: ROIZone,
+                 on_deleted: Callable[[str], int],   # (zone_id) → patrones restantes en memoria
+                 parent=None):
         super().__init__(parent)
         self._zone = zone
-        self._patterns = _get_zone_patterns(zone.id)
-        self._build_ui()
-
-    def _build_ui(self) -> None:
+        self._on_deleted = on_deleted
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             "_PatternCard { background-color: #2c2c3e; border: 1px solid #444;"
             " border-radius: 6px; }"
         )
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        self._build_ui()
 
-        # ── Encabezado ─────────────────────────────────────────────────────────
+    def _build_ui(self) -> None:
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(12, 10, 12, 10)
+        self._root.setSpacing(8)
+        self._render_content()
+
+    def _render_content(self) -> None:
+        # Limpiar widgets previos (para refrescar sin recrear la card)
+        while self._root.count():
+            item = self._root.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        patterns = _get_zone_patterns(self._zone.id)
+
+        # Encabezado
         header = QHBoxLayout()
-
         lbl_id = QLabel(f"Zona: {self._zone.id}")
         lbl_id.setStyleSheet("color: #ffd700; font-size: 14px; font-weight: bold;")
         header.addWidget(lbl_id)
-
         header.addStretch()
 
-        n = len(self._patterns)
-        status_color = "#00dc50" if n > 0 else "#ff6b6b"
-        status_text = f"{n} patrón{'es' if n != 1 else ''}" if n > 0 else "Sin patrones"
-        lbl_count = QLabel(status_text)
-        lbl_count.setStyleSheet(f"color: {status_color}; font-size: 12px;")
-        header.addWidget(lbl_count)
+        n = len(patterns)
+        color = "#00dc50" if n > 0 else "#ff6b6b"
+        self._lbl_count = QLabel(f"{n} patrón{'es' if n != 1 else ''}" if n else "Sin patrones")
+        self._lbl_count.setStyleSheet(f"color: {color}; font-size: 12px;")
+        header.addWidget(self._lbl_count)
 
-        root.addLayout(header)
+        header_w = QWidget()
+        header_w.setLayout(header)
+        self._root.addWidget(header_w)
 
         lbl_roi = QLabel(
             f"ROI: {self._zone.w} × {self._zone.h} px   origen ({self._zone.x}, {self._zone.y})"
         )
         lbl_roi.setStyleSheet("color: #888; font-size: 11px;")
-        root.addWidget(lbl_roi)
+        self._root.addWidget(lbl_roi)
 
-        # ── Miniaturas de patrones ─────────────────────────────────────────────
-        thumbs_row = QHBoxLayout()
+        # Miniaturas
+        thumbs_w = QWidget()
+        thumbs_row = QHBoxLayout(thumbs_w)
+        thumbs_row.setContentsMargins(0, 0, 0, 0)
         thumbs_row.setSpacing(8)
         thumbs_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        for i, path in enumerate(self._patterns, start=1):
-            thumb = _PatternThumbnail(path, i)
-            thumb.deleted.connect(self._on_pattern_deleted)
-            thumbs_row.addWidget(thumb)
-
-        if not self._patterns:
-            lbl_empty = QLabel("Sin imágenes de referencia.\nCaptura una con el botón principal.")
+        if patterns:
+            for i, path in enumerate(patterns, start=1):
+                thumb = _PatternThumbnail(path, i)
+                thumb.deleted.connect(self._on_pattern_deleted)
+                thumbs_row.addWidget(thumb)
+        else:
+            lbl_empty = QLabel("Sin imágenes de referencia.\nUsá 'Nueva zona' para capturar.")
             lbl_empty.setStyleSheet("color: #555; font-size: 11px;")
             thumbs_row.addWidget(lbl_empty)
 
-        root.addLayout(thumbs_row)
+        self._root.addWidget(thumbs_w)
 
     def _on_pattern_deleted(self, path: Path) -> None:
-        self.reference_deleted.emit(self._zone.id)
+        # Recargar patrones en el motor ORB (sin reiniciar)
+        remaining = self._on_deleted(self._zone.id)
+        # Refrescar la card visualmente
+        self._render_content()
 
+
+# ── Diálogo principal ─────────────────────────────────────────────────────────
 
 class PatternsGalleryDialog(QDialog):
     """
     Galería de patrones de referencia.
-    Muestra todas las zonas ROI con sus imágenes OK guardadas en disco.
-    Soporta múltiples patrones por zona.
+    Eliminación en vivo: actualiza UI y motor ORB sin reiniciar la app.
     """
 
-    def __init__(self, zones: list[ROIZone], parent=None):
+    def __init__(self, zones: list[ROIZone],
+                 reload_callback: Callable[[str], int],   # (zone_id) → patrones en memoria
+                 parent=None):
         super().__init__(parent)
         self._zones = zones
-        self.setWindowTitle("Galería de patrones de referencia")
+        self._reload_callback = reload_callback
+        self.setWindowTitle("Patrones de referencia")
         self.setModal(True)
-        self.setMinimumSize(780, 540)
-        self.resize(820, 600)
+        self.setMinimumSize(800, 540)
+        self.resize(840, 600)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -184,16 +198,14 @@ class PatternsGalleryDialog(QDialog):
         root.setContentsMargins(16, 14, 16, 12)
         root.setSpacing(10)
 
-        # Header
         lbl_title = QLabel("Patrones de referencia")
         lbl_title.setStyleSheet("color: #e0e0e0; font-size: 16px; font-weight: bold;")
         root.addWidget(lbl_title)
 
-        n_zones = len(self._zones)
-        total_patterns = sum(len(_get_zone_patterns(z.id)) for z in self._zones)
+        total = sum(len(_get_zone_patterns(z.id)) for z in self._zones)
         lbl_sub = QLabel(
-            f"{n_zones} zona{'s' if n_zones != 1 else ''} definida{'s' if n_zones != 1 else ''}"
-            f"  ·  {total_patterns} patrón(es) guardado(s)"
+            f"{len(self._zones)} zona(s)  ·  {total} patrón(es) guardado(s)  "
+            f"·  Eliminación activa sin reiniciar"
         )
         lbl_sub.setStyleSheet("color: #888; font-size: 11px;")
         root.addWidget(lbl_sub)
@@ -203,7 +215,6 @@ class PatternsGalleryDialog(QDialog):
         sep.setStyleSheet("color: #333;")
         root.addWidget(sep)
 
-        # Scroll
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(
@@ -221,22 +232,20 @@ class PatternsGalleryDialog(QDialog):
         if not self._zones:
             lbl_empty = QLabel(
                 "No hay zonas ROI definidas.\n\n"
-                "Usa el botón  '📷 Definir zona + Referencia OK'  para comenzar."
+                "Usá el botón 'Nueva zona' para comenzar."
             )
             lbl_empty.setStyleSheet("color: #555; font-size: 13px;")
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             vbox.addWidget(lbl_empty)
         else:
             for zone in self._zones:
-                card = _PatternCard(zone)
-                card.reference_deleted.connect(self._on_reference_deleted)
+                card = _PatternCard(zone, self._reload_callback)
                 vbox.addWidget(card)
 
         vbox.addStretch()
         scroll.setWidget(container)
         root.addWidget(scroll)
 
-        # Footer
         footer = QHBoxLayout()
         lbl_dir = QLabel(f"Directorio: {_REFERENCE_IMAGES_DIR}")
         lbl_dir.setStyleSheet("color: #555; font-size: 10px;")
@@ -252,12 +261,3 @@ class PatternsGalleryDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         footer.addWidget(btn_close)
         root.addLayout(footer)
-
-    def _on_reference_deleted(self, zone_id: str) -> None:
-        QMessageBox.information(
-            self,
-            "Patrón eliminado",
-            f"Patrón de '{zone_id}' eliminado del disco.\n"
-            "Cierra y vuelve a abrir la galería para ver los cambios.\n"
-            "Reinicia la app para que el motor refresque los patrones en memoria.",
-        )

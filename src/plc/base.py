@@ -32,3 +32,11 @@ class AbstractPLC(ABC):
 
     @abstractmethod
     def get_info(self) -> dict: ...
+
+    def write_bit(self, address: str, value: bool) -> None:
+        """Escribe un bit arbitrario por dirección. Implementar en cada driver."""
+        raise NotImplementedError(f"{self.__class__.__name__} no implementa write_bit")
+
+    def read_bit(self, address: str) -> bool:
+        """Lee un bit arbitrario por dirección. Implementar en cada driver."""
+        raise NotImplementedError(f"{self.__class__.__name__} no implementa read_bit")

@@ -127,11 +127,13 @@ class InspectionEngine(QObject):
         connected = self._plc.connect()
         self.plc_status_changed.emit(connected)
 
-        if connected:
-            self._plc_thread = PLCWatchdog(self._plc, self._cfg.plc.poll_interval_ms)
-            self._plc_thread.trigger_received.connect(self.trigger)
-            self._plc_thread.connection_lost.connect(lambda: self.plc_status_changed.emit(False))
-            self._plc_thread.start()
+        # Arrancamos el watchdog siempre — si no conectó al inicio,
+        # el watchdog reintenta solo cada 2 s y emite plc_status_changed cuando lo logre.
+        self._plc_thread = PLCWatchdog(self._plc, self._cfg.plc.poll_interval_ms)
+        self._plc_thread.trigger_received.connect(self.trigger)
+        self._plc_thread.connection_lost.connect(lambda: self.plc_status_changed.emit(False))
+        self._plc_thread.connected.connect(lambda: self.plc_status_changed.emit(True))
+        self._plc_thread.start()
 
     def reconnect_plc(self) -> bool:
         if self._plc:
@@ -173,6 +175,43 @@ class InspectionEngine(QObject):
         self._roi_manager.set_zones(self._cfg.rois.zones)
         self._classifier.update_config(self._cfg.vision)
         self._classifier.update_job(self._cfg.app.job_name)
+
+    def reload_zone_references(self, zone_id: str) -> int:
+        """Recarga en memoria los patrones de una zona desde disco (sin reiniciar)."""
+        self._classifier.clear_zone_references(zone_id)
+        zone_dir = _REFERENCE_IMAGES_DIR / zone_id
+        count = 0
+        if zone_dir.is_dir():
+            for path in sorted(zone_dir.glob("*.png")):
+                if self._classifier.add_zone_reference_from_path(zone_id, path):
+                    count += 1
+        logger.info(f"Zona '{zone_id}': {count} patrón(es) recargados en memoria")
+        return count
+
+    def apply_plc_config(self, config: "PLCConfig") -> bool:
+        """Aplica nueva config PLC en caliente — para watchdog actual y reconecta."""
+        if self._plc_thread:
+            self._plc_thread.stop()
+            self._plc_thread = None
+        if self._plc:
+            self._plc.disconnect()
+            self._plc = None
+
+        self.plc_status_changed.emit(False)
+
+        if not config.enabled:
+            return False
+
+        self._plc = create_plc(config)
+        connected = self._plc.connect()
+        self.plc_status_changed.emit(connected)
+
+        self._plc_thread = PLCWatchdog(self._plc, config.poll_interval_ms)
+        self._plc_thread.trigger_received.connect(self.trigger)
+        self._plc_thread.connection_lost.connect(lambda: self.plc_status_changed.emit(False))
+        self._plc_thread.connected.connect(lambda: self.plc_status_changed.emit(True))
+        self._plc_thread.start()
+        return connected
 
     def add_zone_reference(self, zone_id: str, image: np.ndarray) -> bool:
         """Agrega un patrón de referencia para una zona específica."""
@@ -217,32 +256,54 @@ class InspectionEngine(QObject):
 
 
 class PLCWatchdog(QThread):
-    """Hilo de polling al PLC: detecta trigger y vigila conexión."""
+    """Hilo de polling al PLC: detecta trigger, vigila conexión y reintenta automáticamente."""
 
     trigger_received = pyqtSignal()
-    connection_lost = pyqtSignal()
+    connection_lost  = pyqtSignal()
+    connected        = pyqtSignal()   # emitido cuando (re)conecta exitosamente
+
+    _RECONNECT_MS = 3000   # intervalo entre reintentos de conexión
 
     def __init__(self, plc: AbstractPLC, poll_ms: int = 20, parent=None):
         super().__init__(parent)
         self._plc = plc
         self._poll_ms = poll_ms
         self._running = False
+        self._was_connected = False
 
     def run(self) -> None:
         self._running = True
         while self._running:
             if not self._plc.is_connected():
-                self.connection_lost.emit()
-                self.msleep(2000)
-                self._plc.connect()
+                if self._was_connected:
+                    self.connection_lost.emit()
+                    self._was_connected = False
+                self.msleep(self._RECONNECT_MS)
+                try:
+                    ok = self._plc.connect()
+                    if ok:
+                        self._was_connected = True
+                        self.connected.emit()
+                except Exception as e:
+                    logger.warning(f"PLCWatchdog reconexión fallida: {e}")
                 continue
+
+            if not self._was_connected:
+                self._was_connected = True
+                self.connected.emit()
 
             try:
                 if self._plc.read_trigger_bit():
                     self.trigger_received.emit()
             except Exception as e:
-                logger.error(f"PLCWatchdog error: {e}")
+                logger.warning(f"PLCWatchdog: conexión perdida — {e}")
+                self._was_connected = False
                 self.connection_lost.emit()
+                # Forzar estado limpio antes de reconectar
+                try:
+                    self._plc.disconnect()
+                except Exception:
+                    pass
 
             self.msleep(self._poll_ms)
 

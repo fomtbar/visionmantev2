@@ -19,26 +19,34 @@ class CameraCapture(QThread):
         self._cap: cv2.VideoCapture | None = None
         self._running = False
         self._last_frame: np.ndarray | None = None
+        self._fail_count = 0
 
     def run(self) -> None:
         self._running = True
+        self._fail_count = 0
         self._open_camera()
 
         while self._running:
             if self._cap and self._cap.isOpened():
                 ret, frame = self._cap.read()
                 if ret:
+                    if self._fail_count > 0:
+                        logger.info(f"Cámara {self._config.device_index} recuperada.")
+                    self._fail_count = 0
                     frame = self._apply_flips(frame)
                     self._last_frame = frame
                     self.frame_ready.emit(frame)
+                    self.msleep(max(1, 1000 // self._config.fps))
                 else:
-                    logger.warning("Cámara: frame fallido, intentando reconectar...")
+                    self._fail_count += 1
+                    logger.warning("Cámara: frame fallido, reconectando...")
                     self._open_camera()
+                    self.msleep(2000)
             else:
-                self.msleep(500)
+                # Backoff: 3 s los primeros 5 intentos, 10 s después
+                wait_ms = 3000 if self._fail_count < 5 else 10_000
+                self.msleep(wait_ms)
                 self._open_camera()
-
-            self.msleep(max(1, 1000 // self._config.fps))
 
         if self._cap:
             self._cap.release()
@@ -57,7 +65,13 @@ class CameraCapture(QThread):
                 f"{self._config.width}x{self._config.height}@{self._config.fps}fps"
             )
         else:
-            logger.error(f"No se pudo abrir la cámara {self._config.device_index}")
+            self._fail_count += 1
+            # Solo loguear el primer fallo y luego cada 10 intentos para no spamear
+            if self._fail_count == 1 or self._fail_count % 10 == 0:
+                logger.warning(
+                    f"Cámara {self._config.device_index} no disponible "
+                    f"(intento {self._fail_count}) — reintentando…"
+                )
 
     def _apply_flips(self, frame: np.ndarray) -> np.ndarray:
         if self._config.flip_horizontal and self._config.flip_vertical:
