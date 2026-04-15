@@ -23,6 +23,7 @@ from src.gui.dialogs.plc_test_dialog import PLCTestDialog
 from src.gui.dialogs.reference_dialog import ReferenceSelectionDialog
 from src.gui.dialogs.patterns_gallery_dialog import PatternsGalleryDialog
 from src.gui.dialogs.camera_select_dialog import CameraSelectDialog
+from src.gui.dialogs.multi_zone_setup_dialog import MultiZoneSetupDialog
 from src.utils.paths import get_app_root
 
 _REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
@@ -181,19 +182,19 @@ class MainWindow(QMainWindow):
         shortcut.activated.connect(self._engine.trigger)
 
         # ── Configuración de zonas ────────────────────────────────────────────
-        # Paso 1: crear zona y capturar primer patrón
-        self._btn_ref = QPushButton("Nueva zona")
+        # Paso 1: setup de todas las piezas de una vez
+        self._btn_ref = QPushButton("Configurar piezas")
         self._btn_ref.setFixedHeight(60)
         self._btn_ref.setToolTip(
-            "Paso 1 — Dibujá el área a inspeccionar y capturá\n"
-            "una foto de referencia ('pieza presente = OK')."
+            "Congela el frame y te deja marcar\n"
+            "todas las piezas a buscar en un solo paso."
         )
         self._btn_ref.setStyleSheet(
             "QPushButton { background-color: #2c2c3e; color: #00dc50; font-size: 13px; "
             "font-weight: bold; border-radius: 8px; border: 2px solid #00dc50; }"
             "QPushButton:hover { background-color: #003322; }"
         )
-        self._btn_ref.clicked.connect(self._capture_reference)
+        self._btn_ref.clicked.connect(self._setup_zones)
         row.addWidget(self._btn_ref, stretch=1)
 
         # Paso 2 (opcional): agregar más fotos de referencia a una zona ya creada
@@ -332,115 +333,185 @@ class MainWindow(QMainWindow):
         # Desactivar modo dibujo automáticamente
         self._btn_roi.setChecked(False)
 
-    def _capture_reference(self) -> None:
+    def _setup_zones(self) -> None:
+        """Abre el diálogo multi-zona: congela frame, marca N piezas, crea todo de una vez."""
         frame = self._engine.camera.get_frame()
         if frame is None:
             QMessageBox.warning(self, "Sin cámara", "No hay frame disponible.")
             return
 
-        dlg = ReferenceSelectionDialog(frame, parent=self)
-        if not dlg.exec():
+        # Avisar si ya hay zonas configuradas
+        existing = self._engine.roi_manager.get_zones()
+        if existing:
+            reply = QMessageBox.question(
+                self, "Reemplazar zonas",
+                f"Ya hay {len(existing)} zona(s) definida(s).\n"
+                "¿Reemplazarlas con la nueva configuración?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        dlg = MultiZoneSetupDialog(frame, parent=self)
+        if not dlg.exec() or not dlg.zones:
             return
 
-        # 1. Crear zona ROI a partir del rectángulo dibujado
-        rect = dlg.selected_rect
-        self._roi_counter += 1
-        zone_id = f"zona_{self._roi_counter}"
-        zone = ROIZone(
-            id=zone_id,
-            x=rect.x(), y=rect.y(),
-            w=rect.width(), h=rect.height(),
-        )
-        self._engine.roi_manager.add_zone(zone)
+        # Limpiar zonas anteriores (config + referencias ORB en memoria)
+        self._engine.roi_manager.set_zones([])
+        self._engine.clear_all_references()
+        self._roi_counter = 0
+
+        errors = []
+        for draft in dlg.zones:
+            zone_id = draft.name or f"pieza_{draft.index}"
+            self._roi_counter += 1
+
+            zone = ROIZone(
+                id=zone_id,
+                x=draft.rect.x(), y=draft.rect.y(),
+                w=draft.rect.width(), h=draft.rect.height(),
+            )
+            self._engine.roi_manager.add_zone(zone)
+
+            # Guardar patrón en disco
+            zone_dir = _REFERENCE_IMAGES_DIR / zone_id
+            zone_dir.mkdir(parents=True, exist_ok=True)
+            ref_path = zone_dir / "001.png"
+            cv2.imwrite(str(ref_path), draft.image)
+
+            # Cargar en memoria
+            if not self._engine.add_zone_reference(zone_id, draft.image):
+                errors.append(zone_id)
+
         zones = self._engine.roi_manager.get_zones()
         self._camera_view.set_roi_zones(zones)
         self._cfg.update_rois([z.model_dump() for z in zones])
+        self._cfg.save()
 
-        # 2. Guardar patrón en disco (directorio por zona)
-        zone_dir = _REFERENCE_IMAGES_DIR / zone_id
-        zone_dir.mkdir(parents=True, exist_ok=True)
-        existing = list(zone_dir.glob("*.png"))
-        ref_path = zone_dir / f"{len(existing) + 1:03d}.png"
-        saved = cv2.imwrite(str(ref_path), dlg.cropped_image)
-        if saved:
-            logger.info(f"Patrón guardado en disco: {ref_path}")
-        else:
-            logger.warning(f"No se pudo guardar el patrón en: {ref_path}")
-
-        # 3. Cargar patrón en el matcher de la zona
-        if not self._engine.add_zone_reference(zone_id, dlg.cropped_image):
-            QMessageBox.warning(self, "Error", "No se pudo extraer features del patrón.\n"
-                                               "Intenta con mejor iluminación o más textura.")
-            return
-
-        logger.info(f"Patrón OK capturado + ROI '{zone_id}' creada ({rect.width()}×{rect.height()})")
+        n = len(dlg.zones)
+        if errors:
+            QMessageBox.warning(
+                self, "Advertencia",
+                f"{len(errors)} zona(s) sin features suficientes: {', '.join(errors)}\n"
+                "Intentá con mejor iluminación o más textura en esa área."
+            )
         self.statusBar().showMessage(
-            f"Patrón OK capturado — zona '{zone_id}' ({rect.width()}×{rect.height()} px)", 5000
+            f"{n} zona(s) configuradas — patrones guardados.", 5000
         )
+        logger.info(f"Setup multi-zona: {n} zonas creadas")
 
     def _add_pattern_to_zone(self) -> None:
-        """Agrega un nuevo patrón de referencia a una zona ya existente."""
+        """
+        + Variante: agrega una foto de referencia adicional a una zona existente.
+        Útil cuando la misma pieza puede aparecer en distintas orientaciones o
+        condiciones de iluminación.
+        """
         zones = self._engine.roi_manager.get_zones()
         if not zones:
-            QMessageBox.information(self, "Sin zonas",
-                                    "No hay zonas ROI definidas.\n"
-                                    "Usa '📷 Definir zona + Patrón OK' para crear una zona primero.")
+            QMessageBox.information(
+                self, "Sin zonas",
+                "Primero configurá las piezas con 'Configurar piezas'."
+            )
             return
 
-        zone_ids = [z.id for z in zones]
-        if len(zone_ids) == 1:
-            zone_id = zone_ids[0]
+        # Elegir zona — si hay más de una, mostrar selector con conteo actual
+        if len(zones) == 1:
+            zone_id = zones[0].id
         else:
-            zone_id, ok = QInputDialog.getItem(
-                self, "Agregar patrón",
-                "Selecciona la zona a la que agregar el patrón:",
-                zone_ids, 0, False
+            # Construir descripción con conteo de patrones por zona
+            items = []
+            for z in zones:
+                n = self._engine._classifier.zone_pattern_count(z.id)
+                items.append(f"{z.id}  ({n} foto{'s' if n != 1 else ''} actuales)")
+
+            from PyQt6.QtWidgets import QInputDialog
+            chosen, ok = QInputDialog.getItem(
+                self,
+                "¿A qué pieza agregar la variante?",
+                "Elegí la zona a la que querés agregar una foto adicional.\n"
+                "Cada foto extra ayuda cuando la pieza aparece en distintas posiciones:",
+                items, 0, False
             )
             if not ok:
                 return
+            zone_id = zones[items.index(chosen)].id
 
         frame = self._engine.camera.get_frame()
         if frame is None:
             QMessageBox.warning(self, "Sin cámara", "No hay frame disponible.")
             return
 
+        n_actual = self._engine._classifier.zone_pattern_count(zone_id)
         dlg = ReferenceSelectionDialog(frame, parent=self)
+        dlg.setWindowTitle(
+            f"Agregar variante a '{zone_id}'  (ya tiene {n_actual} foto{'s' if n_actual != 1 else ''})"
+        )
         if not dlg.exec():
             return
 
-        # Guardar en directorio de la zona
         zone_dir = _REFERENCE_IMAGES_DIR / zone_id
         zone_dir.mkdir(parents=True, exist_ok=True)
         existing = list(zone_dir.glob("*.png"))
         ref_path = zone_dir / f"{len(existing) + 1:03d}.png"
-        saved = cv2.imwrite(str(ref_path), dlg.cropped_image)
-        if saved:
-            logger.info(f"Patrón adicional guardado: {ref_path}")
-        else:
-            logger.warning(f"No se pudo guardar el patrón en: {ref_path}")
+        cv2.imwrite(str(ref_path), dlg.cropped_image)
 
-        # Cargar en el matcher de la zona
         if not self._engine.add_zone_reference(zone_id, dlg.cropped_image):
-            QMessageBox.warning(self, "Error", "No se pudo extraer features del patrón.")
+            QMessageBox.warning(self, "Error",
+                                "No se pudieron extraer features.\n"
+                                "Intentá con mejor iluminación o más textura.")
             return
 
-        n = len(existing) + 1
+        total = n_actual + 1
         self.statusBar().showMessage(
-            f"Patrón #{n} agregado a zona '{zone_id}'", 5000
+            f"Variante agregada a '{zone_id}' — ahora tiene {total} foto(s) de referencia.", 5000
         )
-        logger.info(f"Patrón #{n} agregado a zona '{zone_id}'")
+        logger.info(f"Variante #{total} agregada a zona '{zone_id}'")
 
     def _clear_rois(self) -> None:
-        reply = QMessageBox.question(
-            self, "Limpiar ROIs",
-            "¿Eliminar todas las zonas de inspección?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        zones = self._engine.roi_manager.get_zones()
+        if not zones:
+            self.statusBar().showMessage("No hay zonas definidas.", 2000)
+            return
+
+        from PyQt6.QtWidgets import QMessageBox as MB
+        msg = MB(self)
+        msg.setWindowTitle("Limpiar zonas")
+        msg.setText(
+            f"Hay {len(zones)} zona(s) configurada(s).\n\n"
+            "¿Qué querés hacer?"
         )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._engine.roi_manager.set_zones([])
-            self._camera_view.set_roi_zones([])
-            self._cfg.update_rois([])
-            self._roi_counter = 0
+        btn_all  = msg.addButton("Borrar todo (zonas + fotos del disco)", MB.ButtonRole.DestructiveRole)
+        btn_cfg  = msg.addButton("Solo limpiar configuración (mantener fotos)", MB.ButtonRole.AcceptRole)
+        btn_no   = msg.addButton("Cancelar", MB.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_no)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == btn_no:
+            return
+
+        # Limpiar memoria y config
+        self._engine.roi_manager.set_zones([])
+        self._camera_view.set_roi_zones([])
+        self._cfg.update_rois([])
+        self._cfg.save()
+        self._roi_counter = 0
+
+        if clicked == btn_all:
+            import shutil
+            deleted = 0
+            for z in zones:
+                zone_dir = _REFERENCE_IMAGES_DIR / z.id
+                if zone_dir.exists():
+                    shutil.rmtree(zone_dir, ignore_errors=True)
+                    deleted += 1
+            self.statusBar().showMessage(
+                f"Zonas eliminadas + {deleted} carpeta(s) de fotos borradas.", 4000
+            )
+        else:
+            self.statusBar().showMessage(
+                "Configuración limpiada. Las fotos siguen en disco.", 4000
+            )
 
     def _open_patterns_gallery(self) -> None:
         zones = self._engine.roi_manager.get_zones()

@@ -13,9 +13,9 @@ flip_horizontal = false
 flip_vertical = false
 
 [vision]
-algorithm = "yolo"
+algorithm = "orb"
 model_path = ""
-confidence_threshold = 0.65
+confidence_threshold = 0.55
 expected_pieces = 1
 result_mode = "global"
 any_ng_is_global_ng = true
@@ -34,10 +34,10 @@ result_hold_ms = 500
 poll_interval_ms = 20
 
 [[rois.zones]]
-id = "zona_1"
-x = 484
-y = 414
-w = 148
-h = 171
+id = "pieza_1"
+x = 754
+y = 396
+w = 165
+h = 246
 expected_class = "ok"
 expected_count = 1

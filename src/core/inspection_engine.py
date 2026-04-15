@@ -176,6 +176,10 @@ class InspectionEngine(QObject):
         self._classifier.update_config(self._cfg.vision)
         self._classifier.update_job(self._cfg.app.job_name)
 
+    def clear_all_references(self) -> None:
+        """Limpia todos los patrones ORB en memoria (para re-setup completo)."""
+        self._classifier.clear_all_zone_references()
+
     def reload_zone_references(self, zone_id: str) -> int:
         """Recarga en memoria los patrones de una zona desde disco (sin reiniciar)."""
         self._classifier.clear_zone_references(zone_id)

@@ -96,15 +96,26 @@ class InspectionClassifier:
 
         # --- ORB: matcher por zona (con fallback al global) ---
         matcher = self._orb_by_zone.get(zone.id)
+        using_fallback = False
         if matcher is None or not matcher.is_ready:
             matcher = self._orb  # fallback legacy
+            using_fallback = True
 
         if matcher.is_ready:
+            n_refs = matcher.reference_count
+            logger.debug(
+                f"Zona '{zone.id}': ORB {'(global fallback)' if using_fallback else ''} "
+                f"{n_refs} patrón(es), crop={crop.image.shape[1]}x{crop.image.shape[0]}"
+            )
             status_str, confidence = matcher.match(crop.image)
+            logger.debug(f"Zona '{zone.id}': resultado={status_str} conf={confidence:.3f}")
             return PieceResult(zone_id=zone.id, status=status_str, confidence=confidence)
 
         # Sin modelo ni referencia
-        logger.warning(f"Zona '{zone.id}': sin patrones de referencia configurados")
+        logger.warning(
+            f"Zona '{zone.id}': sin patrones de referencia — zonas cargadas: "
+            f"{list(self._orb_by_zone.keys())}"
+        )
         return PieceResult(zone_id=zone.id, status="NG", confidence=0.0)
 
     def _compute_global(self, pieces: list[PieceResult]) -> str:
@@ -135,6 +146,11 @@ class InspectionClassifier:
         """Limpia todos los patrones de una zona en memoria."""
         if zone_id in self._orb_by_zone:
             self._orb_by_zone[zone_id].clear_references()
+
+    def clear_all_zone_references(self) -> None:
+        """Limpia todos los patrones de TODAS las zonas (usar antes de re-setup)."""
+        self._orb_by_zone.clear()
+        self._orb.clear_references()
 
     def zone_pattern_count(self, zone_id: str) -> int:
         """Retorna cuántos patrones tiene cargados la zona."""

@@ -14,7 +14,7 @@ class ORBMatcher:
     Retorna OK si la imagen inspeccionada coincide con ALGUNO de los patrones cargados.
     """
 
-    MIN_MATCH_COUNT = 10
+    MIN_MATCH_COUNT = 6   # reducido de 10 — crops pequeños tienen pocos features
 
     def __init__(self, confidence_threshold: float = 0.65):
         self.confidence_threshold = confidence_threshold
@@ -38,8 +38,8 @@ class ORBMatcher:
             return False
 
         kp, des = self._orb.detectAndCompute(img, None)
-        if des is None or len(kp) < 5:
-            logger.warning(f"ORB: pocos features en patrón ({len(kp) if kp else 0})")
+        if des is None or len(kp) < 3:
+            logger.warning(f"ORB: pocos features en patrón ({len(kp) if kp else 0}) — imagen muy lisa")
             return False
 
         self._references.append((kp, des))
@@ -53,8 +53,8 @@ class ORBMatcher:
         """Agrega un patrón de referencia desde numpy array (captura directa desde GUI)."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
         kp, des = self._orb.detectAndCompute(gray, None)
-        if des is None or len(kp) < 5:
-            logger.warning(f"ORB: pocos features en patrón desde array ({len(kp) if kp else 0})")
+        if des is None or len(kp) < 3:
+            logger.warning(f"ORB: pocos features en patrón desde array ({len(kp) if kp else 0}) — imagen muy lisa")
             return False
         self._references.append((kp, des))
         logger.info(
@@ -91,13 +91,17 @@ class ORBMatcher:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
         kp, des = self._orb.detectAndCompute(gray, None)
 
-        if des is None or len(kp) < 3:
+        n_query_kp = len(kp) if kp else 0
+        if des is None or n_query_kp < 2:
+            logger.debug(f"ORB match: query tiene {n_query_kp} keypoints — ABSENT")
             return "ABSENT", 0.0
 
         best_confidence = 0.0
 
-        for ref_kp, ref_des in self._references:
-            matches = self._matcher.knnMatch(ref_des, des, k=2)
+        for i, (ref_kp, ref_des) in enumerate(self._references):
+            # knnMatch necesita k <= len(des); proteger si query tiene pocos kp
+            k = min(2, n_query_kp)
+            matches = self._matcher.knnMatch(ref_des, des, k=k)
 
             good_matches = []
             for match_pair in matches:
@@ -105,11 +109,19 @@ class ORBMatcher:
                     m, n = match_pair
                     if m.distance < 0.75 * n.distance:
                         good_matches.append(m)
+                elif len(match_pair) == 1:
+                    # Solo un vecino disponible — contar directamente
+                    good_matches.append(match_pair[0])
+
+            confidence = min(1.0, len(good_matches) / max(1, len(ref_kp) * 0.5))
+            logger.debug(
+                f"ORB match patrón#{i+1}: ref_kp={len(ref_kp)} query_kp={n_query_kp} "
+                f"good={len(good_matches)}/{self.MIN_MATCH_COUNT} conf={confidence:.2f}"
+            )
 
             if len(good_matches) >= self.MIN_MATCH_COUNT:
-                confidence = min(1.0, len(good_matches) / (len(ref_kp) * 0.5))
                 if confidence >= self.confidence_threshold:
-                    return "OK", round(confidence, 3)  # Coincidencia encontrada
+                    return "OK", round(confidence, 3)
                 best_confidence = max(best_confidence, confidence)
             else:
                 partial = len(good_matches) / self.MIN_MATCH_COUNT * self.confidence_threshold
