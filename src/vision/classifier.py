@@ -13,10 +13,10 @@ from src.vision.roi_manager import ROIManager, ROICrop
 from src.vision.detector import YOLODetector, Detection
 from src.vision.template_matcher import TemplateMatcher
 from src.vision.fallback_orb import ORBMatcher
+from src.vision.windowed_matcher import WindowedMatcher, SearchWindow
 
 
-# Píxeles extra alrededor de la zona ROI para la búsqueda por template.
-# Permite que la pieza esté ligeramente desplazada y el sistema igual la encuentre.
+# Píxeles extra alrededor de la zona ROI para la búsqueda por template legacy.
 _SEARCH_PADDING = 30
 
 
@@ -25,11 +25,10 @@ class InspectionClassifier:
     Orquesta la visión: aplica ROIs, ejecuta el detector y produce InspectionResult.
 
     Jerarquía de detección (por zona):
-      1. YOLO    — si está cargado y configurado
-      2. Template matching — detector primario ORB-free; busca el objeto
-                             dentro de la ventana de zona + margen de búsqueda
-      3. ORB     — fallback para casos con poca correlación de pixel
-                   (p.ej. piezas con orientación variable)
+      1. YOLO          — si está cargado y configurado
+      2. WindowedMatcher — ventana de búsqueda explícita (tolera desplazamientos)
+      3. Template matching — matching sobre ROI + padding fijo
+      4. ORB           — fallback para superficies con pocos keypoints
     """
 
     def __init__(self, config: VisionConfig, roi_manager: ROIManager, job_id: str = "default"):
@@ -39,9 +38,8 @@ class InspectionClassifier:
         self._yolo: YOLODetector | None = None
 
         # ── Matchers por zona ─────────────────────────────────────────────────
-        # Template matcher (primario): TM_CCOEFF_NORMED — busca en ventana
+        self._windowed_by_zone: dict[str, WindowedMatcher] = {}
         self._tmpl_by_zone: dict[str, TemplateMatcher] = {}
-        # ORB matcher (fallback): feature matching — robusto a rotación
         self._orb_by_zone: dict[str, ORBMatcher] = {}
 
         if config.algorithm == "yolo" and config.model_path:
@@ -52,6 +50,8 @@ class InspectionClassifier:
 
     def update_config(self, config: VisionConfig) -> None:
         self._config = config
+        for m in self._windowed_by_zone.values():
+            m.confidence_threshold = config.confidence_threshold
         for m in self._tmpl_by_zone.values():
             m.confidence_threshold = config.confidence_threshold
         for m in self._orb_by_zone.values():
@@ -102,7 +102,23 @@ class InspectionClassifier:
             return PieceResult(zone_id=zone.id, status=status,
                                confidence=best.confidence, bounding_box=bbox)
 
-        # ── Template matching (primario) ──────────────────────────────────────
+        # ── WindowedMatcher (ventana explícita, prioritario sobre template) ───
+        wm = self._windowed_by_zone.get(zone.id)
+        if wm and wm.is_ready:
+            wm_result = wm.match(crop.frame)
+            logger.debug(
+                f"Zona '{zone.id}': Windowed → {wm_result.status} "
+                f"conf={wm_result.confidence:.3f} loc={wm_result.found_bbox}"
+            )
+            bbox = wm_result.found_bbox
+            return PieceResult(
+                zone_id=zone.id,
+                status=wm_result.status,
+                confidence=wm_result.confidence,
+                bounding_box=bbox,
+            )
+
+        # ── Template matching (fallback con padding fijo) ─────────────────────
         tmpl = self._tmpl_by_zone.get(zone.id)
         if tmpl and tmpl.is_ready:
             search_img = self._padded_crop(crop, _SEARCH_PADDING)
@@ -168,36 +184,85 @@ class InspectionClassifier:
     def add_zone_reference(self, zone_id: str, image: np.ndarray) -> bool:
         """
         Agrega un patrón de referencia para una zona.
-        Carga en TemplateMatcher (primario) y ORBMatcher (fallback).
+        Si la zona tiene WindowedMatcher configurado, carga allí primero.
+        También carga en Template+ORB como fallback.
         """
+        loaded = False
+        wm = self._windowed_by_zone.get(zone_id)
+        if wm is not None:
+            loaded = wm.set_pattern_from_array(image) or loaded
+
         ok_tmpl = self._get_or_create_tmpl(zone_id).add_reference_from_array(image)
         ok_orb  = self._get_or_create_orb(zone_id).add_reference_from_array(image)
-        return ok_tmpl or ok_orb   # basta con que uno lo acepte
+        return loaded or ok_tmpl or ok_orb
 
     def add_zone_reference_from_path(self, zone_id: str, path: Path) -> bool:
         """Agrega un patrón desde archivo."""
+        loaded = False
+        wm = self._windowed_by_zone.get(zone_id)
+        if wm is not None:
+            loaded = wm.set_pattern_from_file(str(path)) or loaded
+
         ok_tmpl = self._get_or_create_tmpl(zone_id).add_reference(path)
         ok_orb  = self._get_or_create_orb(zone_id).add_reference(path)
-        return ok_tmpl or ok_orb
+        return loaded or ok_tmpl or ok_orb
+
+    def set_zone_search_window(
+        self, zone_id: str, window: "SearchWindow"
+    ) -> None:
+        """
+        Asigna una ventana de búsqueda explícita a una zona.
+        Activa el modo WindowedMatcher para esa zona.
+        """
+        wm = self._get_or_create_windowed(zone_id)
+        wm.set_search_window(window)
+        logger.info(f"Zona '{zone_id}': ventana de búsqueda asignada {window}")
+
+    def set_zone_search_window_from_roi(
+        self, zone_id: str, expand_px: int = 60
+    ) -> bool:
+        """
+        Crea la ventana de búsqueda expandiendo el ROI de la zona en `expand_px` px.
+        Retorna False si la zona no tiene ROI configurado.
+        """
+        zone = self._roi_manager.get_zone(zone_id)
+        if zone is None:
+            logger.warning(f"set_zone_search_window_from_roi: zona '{zone_id}' no existe")
+            return False
+        win = SearchWindow.from_roi(zone.x, zone.y, zone.w, zone.h, expand_px=expand_px)
+        self.set_zone_search_window(zone_id, win)
+        return True
 
     def clear_zone_references(self, zone_id: str) -> None:
-        """Limpia patrones de una zona."""
+        """Limpia patrones de una zona (todos los matchers)."""
+        if zone_id in self._windowed_by_zone:
+            self._windowed_by_zone[zone_id].clear_patterns()
         if zone_id in self._tmpl_by_zone:
             self._tmpl_by_zone[zone_id].clear_references()
         if zone_id in self._orb_by_zone:
             self._orb_by_zone[zone_id].clear_references()
 
     def clear_all_zone_references(self) -> None:
-        """Limpia todos los patrones de todas las zonas."""
+        self._windowed_by_zone.clear()
         self._tmpl_by_zone.clear()
         self._orb_by_zone.clear()
 
     def zone_pattern_count(self, zone_id: str) -> int:
-        """Cuántos patrones tiene la zona (usa template como referencia)."""
+        """Cuántos patrones tiene la zona."""
+        wm = self._windowed_by_zone.get(zone_id)
+        if wm and wm.pattern_count:
+            return wm.pattern_count
         m = self._tmpl_by_zone.get(zone_id)
         return m.reference_count if m else 0
 
     # ── Helpers internos ──────────────────────────────────────────────────────
+
+    def _get_or_create_windowed(self, zone_id: str) -> WindowedMatcher:
+        if zone_id not in self._windowed_by_zone:
+            self._windowed_by_zone[zone_id] = WindowedMatcher(
+                confidence_threshold=self._config.confidence_threshold
+            )
+        return self._windowed_by_zone[zone_id]
 
     def _get_or_create_tmpl(self, zone_id: str) -> TemplateMatcher:
         if zone_id not in self._tmpl_by_zone:
@@ -224,7 +289,8 @@ class InspectionClassifier:
         if self._config.algorithm == "yolo":
             return self._yolo is not None and self._yolo.is_loaded
         return (
-            any(m.is_ready for m in self._tmpl_by_zone.values())
+            any(m.is_ready for m in self._windowed_by_zone.values())
+            or any(m.is_ready for m in self._tmpl_by_zone.values())
             or any(m.is_ready for m in self._orb_by_zone.values())
         )
 
@@ -232,8 +298,11 @@ class InspectionClassifier:
     def algorithm_name(self) -> str:
         if self._config.algorithm == "yolo" and self._yolo and self._yolo.is_loaded:
             return "YOLOv8"
+        has_windowed = any(m.is_ready for m in self._windowed_by_zone.values())
         has_tmpl = any(m.is_ready for m in self._tmpl_by_zone.values())
         has_orb  = any(m.is_ready for m in self._orb_by_zone.values())
+        if has_windowed:
+            return "Windowed" + ("+Template" if has_tmpl else "") + ("+ORB" if has_orb else "")
         if has_tmpl and has_orb:
             return "Template+ORB"
         if has_tmpl:
