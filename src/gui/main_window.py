@@ -380,17 +380,18 @@ class MainWindow(QMainWindow):
             ref_path = zone_dir / "001.png"
             cv2.imwrite(str(ref_path), draft.image)
 
-            # Cargar en memoria
-            if not self._engine.add_zone_reference(zone_id, draft.image):
-                errors.append(zone_id)
-
-            # Si el draft tiene ventana de búsqueda, activar WindowedMatcher
+            # Crear ventana de búsqueda PRIMERO para que add_zone_reference
+            # cargue el patrón en el WindowedMatcher recién creado
             if draft.search_window is not None:
                 sw = draft.search_window
                 self._engine._classifier.set_zone_search_window(
                     zone_id,
                     SearchWindow(sw.x(), sw.y(), sw.width(), sw.height()),
                 )
+
+            # Cargar patrón en memoria (va al WindowedMatcher si existe, y a Template+ORB)
+            if not self._engine.add_zone_reference(zone_id, draft.image):
+                errors.append(zone_id)
 
         zones = self._engine.roi_manager.get_zones()
         self._camera_view.set_roi_zones(zones)
