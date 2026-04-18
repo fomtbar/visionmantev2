@@ -32,18 +32,24 @@ def run_live(cam_index: int, inspector: ShapeInspector, debug: bool) -> None:
         return
 
     print("Cámara abierta. Teclas: [d] debug  [+/-] tolerancia  [q/ESC] salir")
+    print("IMPORTANTE: haz clic en la ventana OpenCV antes de usar teclado")
+
+    last_frame = None
 
     while True:
+        key = cv2.waitKey(30) & 0xFF
+
         ret, frame = cap.read()
-        if not ret:
-            print("[WARN] Frame vacío")
+        if ret:
+            last_frame = frame
+        if last_frame is None:
             continue
 
         if debug:
-            view = inspector.get_debug_view(frame)
+            view = inspector.get_debug_view(last_frame)
         else:
-            result = inspector.inspect(frame)
-            view = frame.copy()
+            result = inspector.inspect(last_frame)
+            view = last_frame.copy()
             label = f"[{result.status}] conf={result.confidence:.2f}"
             color = (0, 200, 0) if result.status == "OK" else (0, 0, 220) if result.status == "NG" else (0, 180, 220)
             cv2.putText(view, label, (10, 36), cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2)
@@ -52,7 +58,6 @@ def run_live(cam_index: int, inspector: ShapeInspector, debug: bool) -> None:
                 cv2.polylines(view, [pts], True, (0, 255, 0), 2)
 
         cv2.imshow("ShapeInspector", view)
-        key = cv2.waitKey(1) & 0xFF
 
         if key in (ord("q"), 27):
             break

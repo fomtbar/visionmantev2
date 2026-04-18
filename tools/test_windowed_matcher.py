@@ -131,10 +131,11 @@ def run_live(cam_index: int, matcher: WindowedMatcher) -> None:
     state = _DrawState()
     debug = False
 
-    cv2.namedWindow("WindowedMatcher")
+    cv2.namedWindow("WindowedMatcher", cv2.WINDOW_NORMAL)
     cv2.setMouseCallback("WindowedMatcher", state.on_mouse)
 
     print("\n=== WindowedMatcher Tester ===")
+    print("  IMPORTANTE: haz clic en la ventana OpenCV antes de usar teclado")
     print("  [1] Dibujar ventana de búsqueda (grande)")
     print("  [2] Dibujar área de patrón (dentro de la ventana)")
     print("  [c] Capturar patrón")
@@ -143,6 +144,9 @@ def run_live(cam_index: int, matcher: WindowedMatcher) -> None:
     last_frame = None
 
     while True:
+        # Leer teclado ANTES de cap.read para no perder eventos
+        key = cv2.waitKey(30) & 0xFF
+
         ret, frame = cap.read()
         if ret:
             last_frame = frame
@@ -152,8 +156,6 @@ def run_live(cam_index: int, matcher: WindowedMatcher) -> None:
 
         vis = _draw_overlay(last_frame, state, matcher, debug)
         cv2.imshow("WindowedMatcher", vis)
-
-        key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             break
         elif key == ord("1"):
