@@ -18,10 +18,17 @@ class ReferenceSelectionDialog(QDialog):
       - La imagen de referencia OK (cómo se ve una pieza buena)
     """
 
-    def __init__(self, frame: np.ndarray, existing_zone_id: str | None = None, parent=None):
+    def __init__(
+        self,
+        frame: np.ndarray,
+        existing_zone_id: str | None = None,
+        instruction: str | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._frame = frame.copy()
         self._existing_zone_id = existing_zone_id
+        self._custom_instruction = instruction
 
         self.selected_rect: QRect | None = None      # rect en coordenadas del FRAME
         self.cropped_image: np.ndarray | None = None  # recorte de la referencia
@@ -41,7 +48,8 @@ class ReferenceSelectionDialog(QDialog):
         layout.setSpacing(8)
 
         # Instrucción
-        lbl = QLabel("Dibuja un rectángulo alrededor de la pieza en estado OK")
+        text = self._custom_instruction or "Dibuja un rectángulo alrededor de la pieza en estado OK"
+        lbl = QLabel(text)
         lbl.setStyleSheet("color: #ffd700; font-size: 13px; font-weight: bold;")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl)

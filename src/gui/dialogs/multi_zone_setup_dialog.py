@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QRect, QPoint
@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QWidget, QFrame, QLineEdit, QSizePolicy,
 )
+
+from src.gui.dialogs.reference_dialog import ReferenceSelectionDialog
 
 # Colores para cada zona (cíclicos)
 _ZONE_COLORS = [
@@ -25,12 +27,23 @@ _ZONE_COLORS = [
 
 @dataclass
 class ZoneDraft:
-    """Zona marcada antes de confirmar."""
-    index: int            # 1-based
+    """
+    Zona marcada antes de confirmar.
+
+    Modo directo (search_window=None):
+        rect = zona ROI = área del patrón (comportamiento clásico)
+
+    Modo ventana de búsqueda (search_window=rect):
+        rect         = ventana de búsqueda grande
+        search_window = igual a rect (marca que usa windowed matching)
+        image        = patrón más pequeño seleccionado dentro de la ventana
+    """
+    index: int
     name: str
     rect: QRect           # coordenadas del FRAME
     widget_rect: QRect    # coordenadas del canvas (para dibujado)
-    image: np.ndarray     # recorte de referencia
+    image: np.ndarray     # recorte de referencia (o patrón sub-seleccionado)
+    search_window: QRect | None = field(default=None)  # None = modo directo
 
     @property
     def color(self) -> QColor:
@@ -54,7 +67,8 @@ class MultiZoneSetupDialog(QDialog):
         self._zones: list[ZoneDraft] = []
         self._drawing = False
         self._start: QPoint | None = None
-        self._live_rect: QRect | None = None   # rectángulo en curso
+        self._live_rect: QRect | None = None
+        self._windowed_mode = False   # toggle: False=directo  True=ventana+patrón
 
         self.setWindowTitle("Configurar piezas a inspeccionar")
         self.setModal(True)
@@ -80,13 +94,30 @@ class MultiZoneSetupDialog(QDialog):
         left.setContentsMargins(10, 10, 6, 10)
         left.setSpacing(6)
 
-        lbl_inst = QLabel("Dibujá un rectángulo por pieza · clic y arrastrá")
-        lbl_inst.setStyleSheet(
+        inst_row = QHBoxLayout()
+
+        self._lbl_inst = QLabel("Dibujá un rectángulo por pieza · clic y arrastrá")
+        self._lbl_inst.setStyleSheet(
             "color: #ffd700; font-size: 13px; font-weight: bold;"
             " background: #1a1a2e; padding: 4px;"
         )
-        lbl_inst.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left.addWidget(lbl_inst)
+        self._lbl_inst.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        inst_row.addWidget(self._lbl_inst, stretch=1)
+
+        self._btn_mode = QPushButton("Modo: Zona directa")
+        self._btn_mode.setCheckable(True)
+        self._btn_mode.setFixedHeight(30)
+        self._btn_mode.setStyleSheet(
+            "QPushButton { background-color: #2c2c3e; color: #aaa; border: 1px solid #555;"
+            " border-radius: 4px; padding: 2px 10px; font-size: 11px; }"
+            "QPushButton:checked { background-color: #003355; color: #7ec8e3;"
+            " border-color: #7ec8e3; }"
+            "QPushButton:hover { background-color: #3a3a50; }"
+        )
+        self._btn_mode.toggled.connect(self._on_mode_toggled)
+        inst_row.addWidget(self._btn_mode)
+
+        left.addLayout(inst_row)
 
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -184,6 +215,28 @@ class MultiZoneSetupDialog(QDialog):
             self._add_zone(r)
         self._render()
 
+    # ── Modo toggle ───────────────────────────────────────────────────────────
+
+    def _on_mode_toggled(self, checked: bool) -> None:
+        self._windowed_mode = checked
+        if checked:
+            self._btn_mode.setText("Modo: Ventana de búsqueda")
+            self._lbl_inst.setText(
+                "1º dibujá la ventana de búsqueda (grande)  →  "
+                "2º seleccioná el patrón dentro de ella"
+            )
+            self._lbl_inst.setStyleSheet(
+                "color: #7ec8e3; font-size: 12px; font-weight: bold;"
+                " background: #1a1a2e; padding: 4px;"
+            )
+        else:
+            self._btn_mode.setText("Modo: Zona directa")
+            self._lbl_inst.setText("Dibujá un rectángulo por pieza · clic y arrastrá")
+            self._lbl_inst.setStyleSheet(
+                "color: #ffd700; font-size: 13px; font-weight: bold;"
+                " background: #1a1a2e; padding: 4px;"
+            )
+
     # ── Zona ─────────────────────────────────────────────────────────────────
 
     def _add_zone(self, widget_rect: QRect) -> None:
@@ -192,16 +245,33 @@ class MultiZoneSetupDialog(QDialog):
             return
 
         x, y, w, h = frame_rect.x(), frame_rect.y(), frame_rect.width(), frame_rect.height()
-        crop = self._frame[y:y + h, x:x + w].copy()
         idx = len(self._zones) + 1
         name = f"pieza_{idx}"
+
+        if self._windowed_mode:
+            # Modo ventana: pedir al usuario que marque el patrón dentro de la ventana
+            window_crop = self._frame[y:y + h, x:x + w].copy()
+            dlg = ReferenceSelectionDialog(
+                window_crop,
+                instruction="Marcá el PATRÓN a buscar dentro de la ventana (puede ser más pequeño)",
+                parent=self,
+            )
+            dlg.setWindowTitle(f"Seleccionar patrón — pieza {idx}")
+            if not dlg.exec() or dlg.cropped_image is None:
+                return   # usuario canceló → no agregar zona
+            pattern_image = dlg.cropped_image
+            search_window = frame_rect
+        else:
+            pattern_image = self._frame[y:y + h, x:x + w].copy()
+            search_window = None
 
         zone = ZoneDraft(
             index=idx,
             name=name,
             rect=frame_rect,
             widget_rect=widget_rect,
-            image=crop,
+            image=pattern_image,
+            search_window=search_window,
         )
         self._zones.append(zone)
         self._add_zone_row(zone)
@@ -258,10 +328,13 @@ class MultiZoneSetupDialog(QDialog):
         ed.textChanged.connect(lambda txt, z=zone: setattr(z, 'name', txt.strip() or z.name))
         h.addWidget(ed, stretch=1)
 
-        # Dimensiones
+        # Dimensiones + indicador de modo
         fr = zone.rect
-        lbl_size = QLabel(f"{fr.width()}×{fr.height()}")
-        lbl_size.setStyleSheet("color: #666; font-size: 10px;")
+        mode_tag = " [V]" if zone.search_window is not None else ""
+        lbl_size = QLabel(f"{fr.width()}×{fr.height()}{mode_tag}")
+        lbl_size.setStyleSheet(
+            "color: #7ec8e3; font-size: 10px;" if zone.search_window else "color: #666; font-size: 10px;"
+        )
         h.addWidget(lbl_size)
 
         # Botón eliminar
@@ -320,7 +393,10 @@ class MultiZoneSetupDialog(QDialog):
         for zone in self._zones:
             pr = QRect(zone.widget_rect.x() - ox, zone.widget_rect.y() - oy,
                        zone.widget_rect.width(), zone.widget_rect.height())
-            self._draw_zone_rect(painter, pr, zone.color, zone.index, zone.name)
+            self._draw_zone_rect(
+                painter, pr, zone.color, zone.index, zone.name,
+                is_window=zone.search_window is not None,
+            )
 
         # Rectángulo en curso
         if self._live_rect:
@@ -333,18 +409,29 @@ class MultiZoneSetupDialog(QDialog):
         painter.end()
         self._canvas.setPixmap(pixmap)
 
-    def _draw_zone_rect(self, painter: QPainter, rect: QRect,
-                        color: QColor, index: int, name: str, live: bool = False) -> None:
+    def _draw_zone_rect(
+        self, painter: QPainter, rect: QRect,
+        color: QColor, index: int, name: str,
+        live: bool = False, is_window: bool = False,
+    ) -> None:
         style = Qt.PenStyle.DashLine if live else Qt.PenStyle.SolidLine
-        pen = QPen(color, 2, style)
+        width = 2 if not is_window else 3
+        pen = QPen(color, width, style)
         painter.setPen(pen)
         painter.drawRect(rect)
 
-        fill = QColor(color.red(), color.green(), color.blue(), 25 if live else 35)
-        painter.fillRect(rect, QBrush(fill))
+        # Ventana de búsqueda: relleno más tenue + borde interior punteado
+        if is_window:
+            painter.fillRect(rect, QBrush(QColor(color.red(), color.green(), color.blue(), 18)))
+            inner_pen = QPen(color, 1, Qt.PenStyle.DotLine)
+            painter.setPen(inner_pen)
+            margin = 6
+            painter.drawRect(rect.adjusted(margin, margin, -margin, -margin))
+        else:
+            painter.fillRect(rect, QBrush(QColor(color.red(), color.green(), color.blue(), 25 if live else 35)))
 
         # Etiqueta
-        label = name if name else f"pieza_{index}"
+        label = (name if name else f"pieza_{index}") + (" [ventana]" if is_window else "")
         painter.setPen(QPen(QColor(0, 0, 0, 160)))
         painter.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         painter.drawText(rect.x() + 5, rect.y() + 16, label)

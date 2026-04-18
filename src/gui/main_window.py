@@ -24,6 +24,7 @@ from src.gui.dialogs.reference_dialog import ReferenceSelectionDialog
 from src.gui.dialogs.patterns_gallery_dialog import PatternsGalleryDialog
 from src.gui.dialogs.camera_select_dialog import CameraSelectDialog
 from src.gui.dialogs.multi_zone_setup_dialog import MultiZoneSetupDialog
+from src.vision.windowed_matcher import SearchWindow
 from src.utils.paths import get_app_root
 
 _REFERENCE_IMAGES_DIR = get_app_root() / "data" / "reference_images"
@@ -382,6 +383,14 @@ class MainWindow(QMainWindow):
             # Cargar en memoria
             if not self._engine.add_zone_reference(zone_id, draft.image):
                 errors.append(zone_id)
+
+            # Si el draft tiene ventana de búsqueda, activar WindowedMatcher
+            if draft.search_window is not None:
+                sw = draft.search_window
+                self._engine._classifier.set_zone_search_window(
+                    zone_id,
+                    SearchWindow(sw.x(), sw.y(), sw.width(), sw.height()),
+                )
 
         zones = self._engine.roi_manager.get_zones()
         self._camera_view.set_roi_zones(zones)
