@@ -110,7 +110,8 @@ class InspectionClassifier:
                 f"Zona '{zone.id}': Windowed → {wm_result.status} "
                 f"conf={wm_result.confidence:.3f} loc={wm_result.found_bbox}"
             )
-            bbox = wm_result.found_bbox
+            # Pasar bbox solo cuando OK: para NG la posición es un match débil sin sentido visual
+            bbox = wm_result.found_bbox if wm_result.status == "OK" else None
             return PieceResult(
                 zone_id=zone.id,
                 status=wm_result.status,

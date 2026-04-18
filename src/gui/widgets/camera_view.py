@@ -108,22 +108,56 @@ class CameraView(QLabel):
         cv2.putText(frame, label, (16, 44),
                     cv2.FONT_HERSHEY_DUPLEX, 1.4, (255, 255, 255), 2)
 
-        # Bounding boxes por pieza
+        # Bounding boxes por pieza (solo cuando tienen posición)
         for piece in result.pieces:
             if piece.bounding_box:
                 x, y, bw, bh = piece.bounding_box
                 pc = (0, 220, 80) if piece.is_ok else (220, 40, 40)
-                cv2.rectangle(frame, (x, y), (x + bw, y + bh), pc, 2)
-                cv2.putText(frame,
-                            f"{piece.zone_id}: {piece.status} {piece.confidence:.0%}",
-                            (x, y - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, pc, 1)
+                self._draw_match_box(frame, x, y, bw, bh, pc,
+                                     f"{piece.zone_id} {piece.confidence:.0%}")
 
         # Tiempo de inspección
         cv2.putText(frame,
                     f"{result.inference_time_ms:.0f}ms",
                     (frame.shape[1] - 90, frame.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+    @staticmethod
+    def _draw_match_box(
+        frame: np.ndarray,
+        x: int, y: int, bw: int, bh: int,
+        color: tuple[int, int, int],
+        label: str = "",
+    ) -> None:
+        """Rectángulo de match con esquinas en L y etiqueta sobre fondo sólido."""
+        # Relleno semitransparente
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x, y), (x + bw, y + bh), color, -1)
+        cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
+
+        # Borde completo fino
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 1)
+
+        # Esquinas gruesas tipo L
+        arm = max(8, min(bw // 4, bh // 4, 22))
+        t = 3
+        for (cx, cy), ddx, ddy in [
+            ((x,      y),      1,  1),
+            ((x + bw, y),     -1,  1),
+            ((x + bw, y + bh),-1, -1),
+            ((x,      y + bh), 1, -1),
+        ]:
+            cv2.line(frame, (cx, cy), (cx + ddx * arm, cy), color, t)
+            cv2.line(frame, (cx, cy), (cx, cy + ddy * arm), color, t)
+
+        # Etiqueta con fondo sólido
+        if label:
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            lx = x
+            ly = max(y - 4, th + 4)
+            cv2.rectangle(frame, (lx - 2, ly - th - 2), (lx + tw + 2, ly + 2), color, -1)
+            cv2.putText(frame, label, (lx, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
     def _array_to_pixmap(self, frame: np.ndarray) -> QPixmap:
         h, w = frame.shape[:2]
