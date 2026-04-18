@@ -158,6 +158,20 @@ if exist "%ROOT%\snap7.dll" (
     echo        snap7.dll no encontrado ^(PLC Siemens^) — omitido
 )
 
+:: python3XX.dll — junto al .exe (el bootloader la busca ahi primero)
+:: En PyInstaller 6.x la copia en _internal/ no alcanza; debe estar
+:: en el mismo directorio que VisionMante.exe para que LoadLibrary la encuentre.
+for /f "tokens=*" %%i in ('python "%ROOT%\tools\find_python_dll.py" 2^>nul') do set PYDLL=%%i
+if defined PYDLL (
+    if exist "!PYDLL!" (
+        for %%F in ("!PYDLL!") do set PYDLL_NAME=%%~nxF
+        copy /Y "!PYDLL!" "%DIST%\!PYDLL_NAME!" >nul
+        echo        !PYDLL_NAME! copiado junto al exe
+    )
+) else (
+    echo  [AVISO] No se encontro python3XX.dll — el exe puede fallar al arrancar
+)
+
 :: ─────────────────────────────────────────────────────────────────
 :: PASO 5 — Comprimir para distribución
 :: ─────────────────────────────────────────────────────────────────
